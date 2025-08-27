@@ -1,0 +1,80 @@
+.wind-rose {
+    /* These variables deteremine the bands */
+    --speed2:  lch(88% 21 133);
+    --speed4:  lch(88% 62 133);
+    --speed6:  lch(93% 36 197);
+    --speed8:  lch(85% 42 204);
+    --speed10: lch(77% 42 235);
+    --speed12: lch(77% 40 258);
+    --speed14: lch(68% 50 252);
+    --speed16: lch(62% 35 252);
+    --speed18: lch(70% 25 107);
+    --speed20: lch(76% 51 86);
+    --speed22: lch(80% 63 77);
+    --speed24: lch(90% 120 39);
+    --speedmax: lch(71% 69 322);
+
+    font: 30px sans-serif;
+    .key {
+        /* if a key object is created, it will be inside a foreignObject filling the SVG */
+        display: flex;
+        width: 100%;
+        position: absolute;
+        bottom: 0;
+        height: 2em;
+        white-space: nowrap;
+        font: var(--font-size) sans-serif;
+        > * {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+    }
+    .scale circle {
+        fill: none;
+        stroke: #aaa;
+        stroke-width: 1px;
+    }
+    .scale text {
+        fill: #888;
+    }
+    .ball {
+        circle {
+            r: 60px;
+            stroke: white;
+            stroke-width: 5px;
+        }
+        text {
+            text-anchor: middle;
+            fill: black;
+            transform: translate(0, 0.2em);
+        }
+    }
+}
+#debug {
+    border: 1px solid red;
+}
+</style>
+<script>
+function initialize() {
+    let wind = new WindRose(document.getElementById("wind"), {
+    });
+    if (false) {
+        let rot = 0;
+        setInterval(() => {
+            wind.update({speed: 3, dir: rot});
+            rot += 10;
+        }, 1000);
+    } else {
+        wind.subscribe("/ws/", "wh/anemometer");
+    }
+}
+document.addEventListener("DOMContentLoaded", initialize);
+</script>
+</head>
+<body>
+ <svg id="wind"></svg>
+ <div id="debug"></div>
+</body>
+</html>
