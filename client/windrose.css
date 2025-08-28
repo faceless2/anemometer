@@ -1,18 +1,20 @@
 .wind-rose {
     /* These variables deteremine the bands */
-    --speed2:  lch(88% 21 133);
-    --speed4:  lch(88% 62 133);
-    --speed6:  lch(93% 36 197);
-    --speed8:  lch(85% 42 204);
-    --speed10: lch(77% 42 235);
-    --speed12: lch(77% 40 258);
-    --speed14: lch(68% 50 252);
-    --speed16: lch(62% 35 252);
-    --speed18: lch(70% 25 107);
-    --speed20: lch(76% 51 86);
-    --speed22: lch(80% 63 77);
-    --speed24: lch(90% 120 39);
-    --speedmax: lch(71% 69 322);
+    --alpha: 0.5;
+    --speed0:  lch(88% 10 133 / 0.1);
+    --speed2:  lch(88% 21 133 / var(--alpha));
+    --speed4:  lch(88% 62 133 / var(--alpha));
+    --speed6:  lch(93% 36 197 / var(--alpha));
+    --speed8:  lch(85% 42 204 / var(--alpha));
+    --speed10: lch(77% 42 235 / var(--alpha));
+    --speed12: lch(77% 40 258 / var(--alpha));
+    --speed14: lch(68% 50 252 / var(--alpha));
+    --speed16: lch(62% 35 252 / var(--alpha));
+    --speed18: lch(70% 25 107 / var(--alpha));
+    --speed20: lch(76% 51 86 / var(--alpha));
+    --speed22: lch(80% 63 77 / var(--alpha));
+    --speed24: lch(90% 120 39 / var(--alpha));
+    --speedmax: lch(71% 69 322 / var(--alpha));
 
     font: 30px sans-serif;
     .key {

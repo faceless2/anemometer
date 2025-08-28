@@ -16,8 +16,9 @@
 <script>
 function initialize() {
     let wind = new WindRose(document.getElementById("wind"), {
-        max_data_count: 10
+        /*max_data_count: 10*/
     });
+    window.anemometer = wind;
     if (false) {
         let rot = 0;
         setInterval(() => {
@@ -25,7 +26,7 @@ function initialize() {
             rot += 10;
         }, 1000);
     } else {
-        wind.subscribe("https://test.com/ws/", "/anemometer");
+        wind.subscribe("http://mqtt.local/ws/", "wh/anemometer");
     }
 }
 document.addEventListener("DOMContentLoaded", initialize);

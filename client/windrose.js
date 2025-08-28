@@ -32,6 +32,7 @@ class WindRose {
     #mqtt;
     #freqsteps;
     rose;               // the rose 2D array
+    rose0;              // same as an entry in the rose array, but for speed=0
     bands;              // the bands array containing the upper-bound of each speed band
     svg;                // the target SVG
     options;            // the options
@@ -109,11 +110,11 @@ class WindRose {
         ball.appendChild(ballText);
         this.#ballText = ballText;
 
+        this.rose0 = {count:0};
         this.rose = [];
         for (let i=0;i<numarcs;i++) {
             this.rose[i] = []
         }
-        this.bands = [];
     }
 
     /**
@@ -137,18 +138,72 @@ class WindRose {
         this.#mqtt = new Paho.MQTT.Client(url.hostname, port, url.pathname, "WindRose@" + window.location);
         const that = this;
         const mqtt = this.#mqtt;
+        let askhistory = null;
         mqtt.onMessageArrived = (msg) => {
             try {
                 msg = JSON.parse(msg.payloadString);
-                that.update(msg.dir, msg.speed, msg.when);
+                if (msg.history && askhistory && Date.now() - askhistory < 5000) {
+                    let recordCount = 0;
+                    if (msg.history.format == "delta") {
+                        let numarcs = this.rose.length;
+                        let step = msg.history.step;
+                        let when = msg.history.when;
+                        let records = msg.history.records;
+                        let target = 0;
+                        for (let i=0;i<records.length;i++) {
+                            let v = records[i];
+                            if (typeof v == "number") {
+                                recordCount++;
+                                target += v;
+                                if (target < 0) {
+                                    this.#update(0, 0, when);
+                                } else {
+                                    let band = Math.floor(target / numarcs);
+                                    let arc = target - (band * numarcs);
+                                    let dir = (arc + 0.5) * this.options.arc;
+                                    let speed = (this.bands[band] + (band == 0 ? 0 : this.bands[band - 1])) / 2;
+                                    this.#update(dir, speed, when);
+                                }
+                                when += step;
+                            } else if (v.when) {
+                                when += v.when;
+                            }
+                        }
+                        requestAnimationFrame(() => { this.#animate() });
+                    } else {
+                        let when = msg.history.when;
+                        for (let i=0;i<records.length;i++) {
+                            let dir = records[i++];
+                            let speed = records[i++];
+                            when += records[i++];
+                            this.#update(dir, speed, when);
+                            recordCount++;
+                        }
+                    }
+                    console.log("Loaded " + recordCount + " records from history");
+                } else {
+                    that.update(msg.dir, msg.speed, msg.when);
+                }
             } catch (e) {
                 console.log(e);
             }
         };
         mqtt.connect({
             onSuccess: () => {
-                console.log("Connected to " + url + ", subscribing to \"" + topic + "\"");
-                mqtt.subscribe(topic);
+                try {
+                    console.log("Connected to " + url + ", subscribing to \"" + topic + "\"");
+                    mqtt.subscribe(topic);
+                    that.#loadBands();
+                    const numarcs = this.rose.length;
+                    const bands = this.bands;
+                    askhistory = Date.now();
+                    console.log("Publishing \"" + topic + "/history");
+                    let msg = new Paho.MQTT.Message(JSON.stringify({format: "delta", numarcs: numarcs, bands:bands}));
+                    msg.destinationName = topic + "/history";
+                    mqtt.send(msg);
+                } catch (e) {
+                    console.log(e);
+                }
             },
             useSSL: ssl
         });
@@ -161,15 +216,22 @@ class WindRose {
      * @param when the timestamp in seconds or milliseconds (if missing, set to now)
      */
     update(dir, speed, when) {
-        if (!speed && !when && typeof dir == "object") {
+        this.#loadBands();
+        this.#update(dir, speed, when);
+        requestAnimationFrame(() => { this.#animate() });
+    }
+
+    #update(dir, speed, when) {
+        console.log("update: dir="+dir+" speed="+speed+" when="+new Date(when).toISOString());
+        if (typeof speed == "undefined" && typeof when == "undefined" && typeof dir == "object") {
             speed = dir.speed;
             when = dir.when;
             dir = dir.dir;
         }
         const now = Date.now();
         const numarcs = this.rose.length;
-        dir = ((dir % 360) + 360) % 360;
         speed = Math.abs(speed);
+        dir = speed == 0 ? 0 : ((dir % 360) + 360) % 360;
 
         if (!when) {
             when = now;
@@ -183,13 +245,24 @@ class WindRose {
             x: Math.sin(dir * Math.PI / 180) * speed,
             y: -Math.cos(dir * Math.PI / 180) * speed
         };
-        this.q.push(msg);
-        requestAnimationFrame(() => { this.#animate() });
+        if (this.q.length == 0 || this.q[this.q.length - 1].when < when) {
+            this.q.push(msg);
+        } else {
+            for (let i=msg.length-1;i>=0;i--) {
+                if (i == 0 || this.q[i - 1].when < msg.when) {
+                    this.q.splice(i, 0, msg);
+                    break;
+                }
+            }
+        }
 
-        if (speed > 0) {
-            // First delete any expired messages
-            while ((this.options.max_data_count && this.q.length > this.options.max_data_count) || (this.options.max_data_age && now - this.q[0].when > this.options.max_data_age)) {
-                let delmsg = this.q.shift();
+        // First delete any expired messages
+        while ((this.options.max_data_count && this.q.length > this.options.max_data_count) || (this.options.max_data_age && now - this.q[0].when > this.options.max_data_age)) {
+            let delmsg = this.q.shift();
+            let o;
+            if (delmsg.speed == 0) {
+                o = this.rose0;
+            } else {
                 delmsg.arc = Math.round(delmsg.dir / this.options.arc);
                 if (delmsg.arc < 0) {
                     delmsg.arc += numarcs;
@@ -201,29 +274,28 @@ class WindRose {
                         break;
                     }
                 }
-                let o = this.rose[delmsg.arc][delmsg.band];
-                //console.log("del dir="+delmsg.dir+" speed="+delmsg.speed+" arc="+delmsg.arc+"/"+numarcs+" band="+delmsg.band+"/"+this.bands.length);
-                o.count--;
-                if (o.count) {
-                    o.oldest = msg.next;
-                } else {
-                    delete o.oldest;
-                    delete o.newest;
-                }
+                o = this.rose[delmsg.arc][delmsg.band];
             }
+            //console.log("del dir="+delmsg.dir+" speed="+delmsg.speed+" arc="+delmsg.arc+"/"+numarcs+" band="+delmsg.band+"/"+this.bands.length);
+            o.count--;
+            if (o.count) {
+                o.oldest = msg.next;
+            } else {
+                delete o.oldest;
+                delete o.newest;
+            }
+        }
 
+        let o;
+        if (speed == 0) {
+            o = this.rose0;
+        } else {
             let band = 0;
-            while (true) {
-                if (band == this.bands.length) {
-                    this.#updateBands(speed);
-                    if (band == this.bands.length) {
-                        break;
-                    }
-                }
+            for (band=0;band < this.bands.length;band++) {
+                this.options.key.children[band].style.display = null;
                 if (speed < this.bands[band]) {
                     break;
                 }
-                band++;
             }
             let arc = Math.round(dir / this.options.arc);
             if (arc < 0) {
@@ -235,100 +307,110 @@ class WindRose {
             while (band >= this.rose[arc].length) {
                 this.rose[arc].push({count:0});
             }
-            let o = this.rose[arc][band];
-            o.count++;
-            if (o.newest) {
-                o.newest.next = msg;
-            }
-            o.newest = msg;
-            if (o.count == 0) {
-                o.oldest = msg;
-            }
+            o = this.rose[arc][band];
+        }
+        o.count++;
+        if (o.newest) {
+            o.newest.next = msg;
+        }
+        o.newest = msg;
+        if (o.count == 0) {
+            o.oldest = msg;
+        }
 
+        const total = this.q.length;
+        let maxfreq = this.rose0.count / total;
+        let minfreq = maxfreq;
+        let minmindir = 0, maxmindir = 0;
+        for (let i=0;i<numarcs;i++) {
+            let c = 0;
+            for (let j=0;j<this.rose[i].length;j++) {
+                c += this.rose[i][j].count;
+            }
+            let freq = c / total;
+            if (freq > maxfreq) {
+                maxfreq = freq;
+            }
+            if (freq < minfreq) {
+                minfreq = freq;
+                minmindir = maxmindir = i;
+            } else if (freq == minfreq && i == maxmindir + 1) {
+                maxmindir = i;
+            }
+        }
+        maxfreq = Math.max(Math.min(maxfreq, this.options.freq_max), this.options.freq_min);
+        const freqsteps = Math.ceil(maxfreq / (this.options.freq_step / 100));
+        if (freqsteps != this.#freqsteps) {
+            const g = this.svg.querySelector(".scale");
+            while (g.firstChild) {
+                g.firstChild.remove();
+            }
+            for (let i=1;i<=freqsteps;i++) {
+                let elt = document.createElementNS(this.#SVGNS, "circle");
+                let r = Math.round(this.options.radius * i / freqsteps);
+                elt.setAttribute("r", r);
+                g.appendChild(elt);
+                let text = document.createElementNS(this.#SVGNS, "text");
+                let angle = ((minmindir + maxmindir) / 2 * this.options.arc) * Math.PI / 180;
+                text.setAttribute("x", Math.round(Math.sin(angle) * r));
+                text.setAttribute("y", Math.round(-Math.cos(angle) * r));
+                text.innerHTML = Math.round(this.options.freq_step * i) + "%";
+                g.appendChild(text);
+            }
+            this.#freqsteps = freqsteps;
+        }
+        maxfreq = freqsteps * this.options.freq_step / 100;
+        const scale = this.options.radius / maxfreq;
 
-            const total = this.q.length;
-            let maxfreq = 0;
-            let minfreq = 0;
-            let minmindir = 0, maxmindir = 0;
-            for (let i=0;i<numarcs;i++) {
-                let c = 0;
-                for (let j=0;j<this.rose[i].length;j++) {
-                    c += this.rose[i][j].count;
-                }
-                let freq = c / total;
-                if (i == 0) {
-                    minfreq = maxfreq = freq;
+        const g = this.svg.querySelector(".wind");
+        const mul = this.options.arc * Math.PI / 180;
+        for (let i=0;i<numarcs;i++) {
+            let freq0 = 0;
+            for (let j=0;j<this.rose[i].length;j++) {
+                o = this.rose[i][j];
+                if (o.count == 0) {
+                    if (o.elt) {
+                        o.elt.remove();
+                        delete o.elt;
+                    }
                 } else {
-                    if (freq > maxfreq) {
-                        maxfreq = freq;
+                    if (!o.elt) {
+                        o.elt = document.createElementNS(this.#SVGNS, "path");
+                        o.elt.style.fill = "var(--speed" + (this.bands[j] == this.#MAXSPEED ? "max" : this.bands[j]) + ")";
+                        o.elt.classList.add("band" + j);
+                        g.appendChild(o.elt);
                     }
-                    if (freq < minfreq) {
-                        minfreq = freq;
-                        minmindir = maxmindir = i;
-                    } else if (freq == minfreq && i == maxmindir + 1) {
-                        maxmindir = i;
-                    }
+                    let freq = o.count / total;
+                    let freq1 = freq0 + freq;
+                    let r0 = freq0 * scale;
+                    let r1 = freq1 * scale;
+                    let p0x = Math.sin((i - 0.5) * mul) * r0;
+                    let p0y = -Math.cos((i - 0.5) * mul) * r0;
+                    let p1x = Math.sin((i - 0.5) * mul) * r1;
+                    let p1y = -Math.cos((i - 0.5) * mul) * r1;
+                    let p2x = Math.sin((i + 0.5) * mul) * r1;
+                    let p2y = -Math.cos((i + 0.5) * mul) * r1;
+                    let p3x = Math.sin((i + 0.5) * mul) * r0;
+                    let p3y = -Math.cos((i + 0.5) * mul) * r0;
+                    o.elt.setAttribute("d", "M " + p0x + " " + p0y + " L " + p1x + " " + p1y + " A " + r1 + " " + r1 + " 0 0 1 " + p2x + " " + p2y + " L " + p3x + " " +p3y + " A " + r0 + " " + r0 + " 0 0 0 " + p0x + " " + p0y);
+                    freq0 = freq1;
                 }
             }
-            maxfreq = Math.max(Math.min(maxfreq, this.options.freq_max), this.options.freq_min);
-            const freqsteps = Math.ceil(maxfreq / (this.options.freq_step / 100));
-            if (freqsteps != this.#freqsteps) {
-                const g = this.svg.querySelector(".scale");
-                while (g.firstChild) {
-                    g.firstChild.remove();
-                }
-                for (let i=1;i<=freqsteps;i++) {
-                    let elt = document.createElementNS(this.#SVGNS, "circle");
-                    let r = Math.round(this.options.radius * i / freqsteps);
-                    elt.setAttribute("r", r);
-                    g.appendChild(elt);
-                    let text = document.createElementNS(this.#SVGNS, "text");
-                    let angle = ((minmindir + maxmindir) / 2 * this.options.arc) * Math.PI / 180;
-                    text.setAttribute("x", Math.round(Math.sin(angle) * r));
-                    text.setAttribute("y", Math.round(-Math.cos(angle) * r));
-                    text.innerHTML = Math.round(this.options.freq_step * i) + "%";
-                    g.appendChild(text);
-                }
-                this.#freqsteps = freqsteps;
+        }
+        o = this.rose0;
+        if (o.count == 0) {
+            if (o.elt) {
+                o.elt.remove();
+                delete o.elt;
             }
-            maxfreq = freqsteps * this.options.freq_step / 100;
-            const scale = this.options.radius / maxfreq;
-
-            const g = this.svg.querySelector(".wind");
-            const mul = this.options.arc * Math.PI / 180;
-            for (let i=0;i<numarcs;i++) {
-                let freq0 = 0;
-                for (let j=0;j<this.rose[i].length;j++) {
-                    o = this.rose[i][j];
-                    if (o.count == 0) {
-                        if (o.elt) {
-                            o.elt.remove();
-                            delete o.elt;
-                        }
-                    } else {
-                        if (!o.elt) {
-                            o.elt = document.createElementNS(this.#SVGNS, "path");
-                            o.elt.style.fill = "var(--speed" + (this.bands[j] == this.#MAXSPEED ? "max" : this.bands[j]) + ")";
-                            o.elt.classList.add("band" + j);
-                            g.appendChild(o.elt);
-                        }
-                        let freq = o.count / total;
-                        let freq1 = freq0 + freq;
-                        let r0 = freq0 * scale;
-                        let r1 = freq1 * scale;
-                        let p0x = Math.sin((i - 0.5) * mul) * r0;
-                        let p0y = -Math.cos((i - 0.5) * mul) * r0;
-                        let p1x = Math.sin((i - 0.5) * mul) * r1;
-                        let p1y = -Math.cos((i - 0.5) * mul) * r1;
-                        let p2x = Math.sin((i + 0.5) * mul) * r1;
-                        let p2y = -Math.cos((i + 0.5) * mul) * r1;
-                        let p3x = Math.sin((i + 0.5) * mul) * r0;
-                        let p3y = -Math.cos((i + 0.5) * mul) * r0;
-                        o.elt.setAttribute("d", "M " + p0x + " " + p0y + " L " + p1x + " " + p1y + " A " + r1 + " " + r1 + " 0 0 1 " + p2x + " " + p2y + " L " + p3x + " " +p3y + " A " + r0 + " " + r0 + " 0 0 0 " + p0x + " " + p0y);
-                        freq0 = freq1;
-                    }
-                }
+        } else {
+            if (!o.elt) {
+                o.elt = document.createElementNS(this.#SVGNS, "circle");
+                o.elt.style.fill = "var(--speed0)";
+                g.insertBefore(o.elt, g.firstChild);
             }
+            let freq = o.count / total;
+            o.elt.setAttribute("r", Math.round(freq * scale));
         }
     }
 
@@ -336,54 +418,56 @@ class WindRose {
      * Update the key and the bands array
      * @param speed the new max speed
      */
-    #updateBands(speed) {
-        speed = Math.ceil(speed);
-        this.bands = [];
-
-        const style = window.getComputedStyle(this.svg);
-        if (!style.getPropertyValue("--speedmax")) {
-            this.svg.style.setProperty("--speedmax", "red");
-        }
-        for (let i=1;i<this.#MAXSPEED;i++) {
-            if (style.getPropertyValue("--speed" + i)) {
-                this.bands.push(i);
-                if (i > speed && this.bands.length >= this.options.minbands) {
-                    break;
+    #loadBands() {
+        if (!this.bands) {
+            this.bands = [];
+            const style = window.getComputedStyle(this.svg);
+            if (!style.getPropertyValue("--speedmax")) {
+                this.svg.style.setProperty("--speedmax", "red");
+            }
+            for (let i=1;i<this.#MAXSPEED;i++) {
+                if (style.getPropertyValue("--speed" + i)) {
+                    this.bands.push(i);
                 }
             }
-        }
-        if (speed > this.bands[this.bands.length - 1] || this.options.minbands > this.bands.length + 1) {
             this.bands.push(this.#MAXSPEED);
-        }
 
-        let key = this.options.key;
-        if (!key) {
-            let fo = document.createElementNS(this.#SVGNS, "foreignObject");
-            fo.setAttribute("x", this.svg.viewBox.baseVal.x);
-            fo.setAttribute("x", this.svg.viewBox.baseVal.y);
-            fo.setAttribute("width", this.svg.viewBox.baseVal.width);
-            fo.setAttribute("height", this.svg.viewBox.baseVal.height);
-            this.svg.appendChild(fo);
-            key = document.createElement("div");
-            key.classList.add("key");
-            fo.appendChild(key);
-            this.options.key = key;
-        }
-        while (key.firstChild) {
-            key.firstChild.remove();
-        }
-        for (let i=0;i<this.bands.length;i++) {
-            let min = i == 0 ? 0 : this.bands[i - 1];
-            let max = this.bands[i];
-            let e = document.createElement("div");
-            key.appendChild(e);
-            e.style.background = "var(--speed" + (max == this.#MAXSPEED ? "max" : max) + ")";
-            let s = document.createElement("span");
-            e.appendChild(s);
-            if (max == this.#MAXSPEED) {
-                s.innerHTML = "> " + min + this.options.units;
-            } else {
-                s.innerHTML = min + "-" + max + this.options.units;
+            let key = this.options.key;
+            if (!key) {
+                let fo = document.createElementNS(this.#SVGNS, "foreignObject");
+                fo.setAttribute("x", this.svg.viewBox.baseVal.x);
+                fo.setAttribute("x", this.svg.viewBox.baseVal.y);
+                fo.setAttribute("width", this.svg.viewBox.baseVal.width);
+                fo.setAttribute("height", this.svg.viewBox.baseVal.height);
+                this.svg.appendChild(fo);
+                key = document.createElement("div");
+                key.classList.add("key");
+                fo.appendChild(key);
+                this.options.key = key;
+            }
+            while (key.firstChild) {
+                key.firstChild.remove();
+            }
+            for (let i=0;i<this.bands.length;i++) {
+                let min = i == 0 ? 0 : this.bands[i - 1];
+                let max = this.bands[i];
+                let e = document.createElement("div");
+                key.appendChild(e);
+                e.style.background = "var(--speed" + (max == this.#MAXSPEED ? "max" : max) + ")";
+                e.style.display = "none";
+                let s = document.createElement("span");
+                e.appendChild(s);
+                if (max == this.#MAXSPEED) {
+                    s.innerHTML = "> " + min + this.options.units;
+                } else {
+                    s.innerHTML = min + "-" + max + this.options.units;
+                }
+            }
+            for (let i=0;i<this.options.minbands;i++) {
+                let x = this.options.key.children[i];
+                if (x) {
+                    x.style.display = null;
+                }
             }
         }
     }
