@@ -1,6 +1,7 @@
 .wind-rose {
-    /* These variables deteremine the bands */
-    --alpha: 0.5;
+    /* the "--radius" variable will be set to the radius of the outer circle */
+    /* These variables determine the speed bands */
+    --alpha: 0.7;
     --speed0:  lch(88% 10 133 / 0.1);
     --speed2:  lch(88% 21 133 / var(--alpha));
     --speed4:  lch(88% 62 133 / var(--alpha));
@@ -16,17 +17,16 @@
     --speed24: lch(90% 120 39 / var(--alpha));
     --speedmax: lch(71% 69 322 / var(--alpha));
 
-    font: 30px sans-serif;
+    font: calc(var(--radius) / 20) sans-serif;
     .key {
         /* if a key object is created, it will be inside a foreignObject filling the SVG */
-        /* Safari messes this up */
+        /* However Safari messes this up, so do it externally or make sure viewBox==clientWidth */
         display: flex;
         width: 100%;
         position: absolute;
         bottom: 0;
         height: 2em;
         white-space: nowrap;
-        font: var(--font-size) sans-serif;
         > * {
             flex: 1;
             display: flex;
@@ -34,19 +34,20 @@
             justify-content: center;
         }
     }
-    .scale circle {
+    .scale circle {     /* The scale rings */
         fill: none;
         stroke: #aaa;
-        stroke-width: 1px;
+        stroke-width: 0.02em;
     }
-    .scale text {
+    .scale text {       /* The text on the scale rings */
         fill: #888;
     }
-    .ball {
+    .ball {             /* The moving ball showing the current speed */
+        fill: var(--speed0);    /* default, overridden */
         circle {
-            r: 60px;
+            r: 2em;
             stroke: white;
-            stroke-width: 5px;
+            stroke-width: 0.1em;
         }
         text {
             text-anchor: middle;

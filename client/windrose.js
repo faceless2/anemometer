@@ -29,12 +29,11 @@ class WindRose {
     #SVGNS = "http://www.w3.org/2000/svg";
     #ball;
     #ballText;
-    #mqtt;
     #freqsteps;
     #preloading;
     rose;               // the rose 2D array
-    rose0;              // same as an entry in the rose array, but for speed=0
     bands;              // the bands array containing the upper-bound of each speed band
+    rose0;              // same as an entry in the rose array, but for speed=0
     svg;                // the target SVG
     options;            // the options
     q = [];             // the queue of events
@@ -42,7 +41,7 @@ class WindRose {
     constructor(svg, options) {
         this.svg = svg;
         this.svg.classList.add("wind-rose");
-        if (!this.svg.viewBox.baseVal) {
+        if (!this.svg.viewBox.baseVal || this.svg.viewBox.baseVal.width * this.svg.viewBox.baseVal.height == 0) {
             svg.setAttribute("viewBox", "0 0 " + this.svg.clientWidth+" " + this.svg.clientHeight);
         }
 
@@ -88,7 +87,7 @@ class WindRose {
             this.options.cy = (this.svg.viewBox.baseVal.y + this.svg.viewBox.baseVal.height) / 2;
         }
         if (!(this.options.radius > 0)) {
-            this.options.radius = (Math.min(this.svg.viewBox.baseVal.width, this.svg.viewBox.baseVal.height) / 2) - 1;
+            this.options.radius = Math.max(10, (Math.min(this.svg.viewBox.baseVal.width, this.svg.viewBox.baseVal.height) / 2) - 1);
         }
 
         let g = document.createElementNS(this.#SVGNS, "g");
@@ -116,63 +115,7 @@ class WindRose {
         for (let i=0;i<numarcs;i++) {
             this.rose[i] = []
         }
-    }
-
-    /**
-     * Connect to the specified MQTT URL and subscribe to the specified topic.
-     * Messages are expected to contain keys "speed" (in units) and "dir" (in degrees), and an optional "when" (timestamp in s or ms)
-     * @param url the URL, relative to the document location, eg "/ws"
-     * @param topic the topic, eg "anemometer"
-     */
-    subscribe(url, topic) {
-        if (!url) {
-            throw new Error("No URL");
-        }
-        if (!topic) {
-            throw new Error("No topic");
-        }
-        if (!(url instanceof URL)) {
-            url = new URL(url, window.location);
-        }
-        let ssl = url.protocol == "https:";
-        let port = url.port ? url.port : ssl ? 443 : 80;
-        this.#mqtt = new Paho.MQTT.Client(url.hostname, port, url.pathname, "WindRose@" + window.location);
-        const that = this;
-        const mqtt = this.#mqtt;
-        let askhistory = null;
-        mqtt.onMessageArrived = (msg) => {
-            try {
-                msg = JSON.parse(msg.payloadString);
-                if (askhistory && Date.now() - askhistory < 5000 && msg.history) {
-                    askhistory = 0;
-                    this.preload(msg.history);
-                }
-                if (typeof msg.dir == "number" && typeof msg.speed == "number") {
-                    that.update(msg.dir, msg.speed, msg.when);
-                }
-            } catch (e) {
-                console.log(e);
-            }
-        };
-        mqtt.connect({
-            onSuccess: () => {
-                try {
-                    console.log("Wind-rose \"" + that.options.id+"\": connected to " + url + ", subscribing to \"" + topic + "\"");
-                    mqtt.subscribe(topic);
-                    that.#loadBands();
-                    const numarcs = this.rose.length;
-                    const bands = this.bands;
-                    askhistory = Date.now();
-                    console.log("Wind-rose \"" + that.options.id + "\": publishing \"" + topic + "/history");
-                    let msg = new Paho.MQTT.Message(JSON.stringify({format: "delta", numarcs: numarcs, bands:bands}));
-                    msg.destinationName = topic + "/history";
-                    mqtt.send(msg);
-                } catch (e) {
-                    console.log(e);
-                }
-            },
-            useSSL: ssl
-        });
+        this.#loadBands();
     }
 
     /**
@@ -201,7 +144,7 @@ class WindRose {
         this.#preloading = true;
         try {
             let start; 
-            const a = [];
+            let a = [];
             if (data.format == "delta") {
                 let numarcs = this.rose.length;
                 let step = data.step;
@@ -261,7 +204,7 @@ class WindRose {
                 }
                 if (end == a.length) {
                     this.#preloading = false;
-                    console.log("Wind-rose \"" + this.options.id + "\": pre-loaded " + recordcount + " records from " + new Date(start).toISOString()+" to " + new Date(when).toISOString()+": speed histogram=" + JSON.stringify(bandcount));
+                    console.log("Wind-rose \"" + this.options.id + "\": pre-loaded " + recordcount + " \"" + data.format + "\" records from " + new Date(start).toISOString()+" to " + new Date(when).toISOString()+": speed histogram=" + JSON.stringify(bandcount));
                 } else {
                     setTimeout(() => { f(when, end) }, 0);
                 }
@@ -283,30 +226,30 @@ class WindRose {
         if (this.#preloading) {
             return;
         }
-        if (this.options.debug) {
-            console.log("Wind-rose \"" + this.options.id + "\": update: dir="+dir+" speed="+speed+" when="+new Date(when).toISOString());
-        }
-        this.#loadBands();
-        this.#update(dir, speed, when);
-        requestAnimationFrame(() => { this.#animate() });
-    }
-
-    #update(dir, speed, when) {
         if (typeof speed == "undefined" && typeof when == "undefined" && typeof dir == "object") {
             speed = dir.speed;
             when = dir.when;
             dir = dir.dir;
         }
-        const now = Date.now();
-        const numarcs = this.rose.length;
-        speed = Math.abs(speed);
-        dir = speed == 0 ? 0 : ((dir % 360) + 360) % 360;
-
         if (!when) {
-            when = now;
+            when = Date.now();
         } else if (when < 1000000000000) {     // convert from s to ms
             when *= 1000;
         }
+        this.#loadBands();
+        if (this.options.debug) {
+            console.log("Wind-rose \"" + this.options.id + "\": update: dir="+dir+" speed="+speed+" when="+new Date(when).toISOString());
+        }
+        this.#update(dir, speed, when);
+        requestAnimationFrame(() => { this.#animate() });
+    }
+
+    #update(dir, speed, when) {
+        const now = Date.now();
+        const numarcs = this.rose.length;
+        speed = Math.max(0, speed);
+        dir = speed == 0 ? 0 : ((dir % 360) + 360) % 360;
+
         const msg = {
             dir: dir,
             speed: speed,
@@ -503,9 +446,10 @@ class WindRose {
      * @param speed the new max speed
      */
     #loadBands() {
-        if (!this.bands) {
+        if (!this.bands && document.contains(this.svg)) {
             this.bands = [];
             const style = window.getComputedStyle(this.svg);
+            this.svg.style.setProperty("--radius", this.options.radius + "px");
             if (!style.getPropertyValue("--speedmax")) {
                 this.svg.style.setProperty("--speedmax", "red");
             }
@@ -537,7 +481,7 @@ class WindRose {
                 let max = this.bands[i];
                 let e = document.createElement("div");
                 key.appendChild(e);
-                e.style.background = "var(--speed" + (max == this.#MAXSPEED ? "max" : max) + ")";
+                e.style.background = style.getPropertyValue("--speed" + (max == this.#MAXSPEED ? "max" : max));
                 e.style.display = "none";
                 let s = document.createElement("span");
                 e.appendChild(s);

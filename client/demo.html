@@ -1,39 +1,139 @@
 <!DOCTYPE html>
 <html>
 <head>
+<title>Demo wind-rose</title>
 <meta charset="utf-8"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.2/mqttws31.js"></script>
 <script src="windrose.js"></script>
-<link rel="stylesheet" href="windrose.css"></script>
+<link rel="stylesheet" href="windrose.css">
 <style>
-#wind {
-    display: block;
-    max-width: 90vw;
-    max-height: 90vh;
+/* All styling here is arbirary and just for the demo */
+body {
+    margin: 0;
+    background: black;
+    overflow: hidden;
+    font-family: sans-serif;
+}
+#container {
+    height: 100vh;
+    max-width: 800px;
+    margin: 0 auto;
+    background: white;
     border: 1px solid gray;
+    display: flex;
+    flex-flow: column;
+}
+#wind {
+    flex: 1;
+}
+#wind-key {
+    display: flex;
+    width: 100%;
+    justify-content: stretch;
+}
+#wind-key > * {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
 }
 </style>
 <script>
+
 function initialize() {
-    let wind = new WindRose(document.getElementById("wind"), {
-        /*max_data_count: 10*/
+    // Create a wind-rose
+    const windrose = new WindRose(document.getElementById("wind"), {
+        debug: true,
+        key: document.getElementById("wind-key") /* optional */
     });
-    window.anemometer = wind;
-    if (false) {
-        let rot = 0;
+    window.windrose = windrose;
+
+    // Try the options below to populate it with data
+
+    if (true) {
+        // Dummy data
+        let dir = 0;
+        let speed = 0;
         setInterval(() => {
-            wind.update({dir:rot, speed:3});
-            rot += 10;
+            dir += (Math.random() * 20) - 10;
+            speed += (Math.random() * 20) - 10;
+            if (speed < 0) {
+                speed = -speed;
+            }
+            windrose.update({dir: Math.round(dir), speed: Math.round(Math.log(speed) * 10) / 10 });
         }, 1000);
+    } else if (true) {
+        // Simple MQTT example using data from a public server
+        const mqtt = new Paho.MQTT.Client("test.mosquitto.org", 8080, "", "WindRose@" + window.location);
+        mqtt.onMessageArrived = (msg) => {
+            try {
+                msg = JSON.parse(msg.payloadString);
+                let dir = msg.wind_instant_dir;
+                let speed = msg.wind_instant_speed;
+                if (msg.unit == "cm/s") {
+                    speed /= 100;
+                }
+                if (typeof dir == "number" && typeof speed == "number") {
+                    windrose.update(dir, speed);
+                }
+            } catch (e) {
+                console.log(e);
+            }
+        };
+        mqtt.connect({ onSuccess:() => {
+            // Subscribe to a random service we found broadcasting which looks
+            // like eg {"type":"INSTANT_WIND","wind_instant_speed":87,"wind_instant_dir":110,"unit":"cm/s"}
+            mqtt.subscribe("/windnerd-one-172");
+        }});
     } else {
-        wind.subscribe("http://mqtt.local/ws/", "wh/anemometer");
+        // More complex MQTT example assuming a local MQTT server that supports the "history" loading
+        const host = "mqtt.local";
+        const path = "/ws/";
+        const topic = "wh/anemometer";
+        const ssl = false;
+        const mqtt = new Paho.MQTT.Client(host, ssl ? 443 : 80, path, "WindRose@" + window.location);
+        let askhistory = null;
+        mqtt.onMessageArrived = (msg) => {
+            try {
+                msg = JSON.parse(msg.payloadString);
+                if (askhistory && Date.now() - askhistory < 5000 && msg.history) {  // We asked for history within previous 5s; use it.
+                    askhistory = 0;
+                    windrose.preload(msg.history);
+                }
+                if (typeof msg.dir == "number" && typeof msg.speed == "number") {
+                    windrose.update(msg.dir, msg.speed, msg.when);
+                }
+            } catch (e) {
+                console.log(e);
+            }
+        };
+        mqtt.connect({
+            onSuccess: () => {
+                try {
+                    mqtt.subscribe(topic);
+                    const when = Date.now() - 24*60*60*1000;    // 24hrs
+                    const numarcs = windrose.rose.length;
+                    const bands = windrose.bands;
+                    askhistory = Date.now();
+                    mqtt.send(topic + "/history", JSON.stringify({format: "delta", when:when, numarcs: numarcs, bands: bands}));
+                } catch (e) {
+                    console.log(e);
+                }
+            },
+            useSSL: ssl
+        });
     }
 }
+
 document.addEventListener("DOMContentLoaded", initialize);
 </script>
 </head>
 
 <body>
- <svg id="wind" viewBox="0 0 2000 2300"></svg>
+ <!-- structure is arbitrary and just for the demo. Only required element is the SVG -->
+ <div id="container">
+  <svg id="wind"></svg>
+  <div id="wind-key"></div>
+ </div>
 </body>
 </html>
