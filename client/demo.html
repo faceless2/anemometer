@@ -92,12 +92,11 @@ function initialize() {
         const topic = "wh/anemometer";
         const ssl = false;
         const mqtt = new Paho.MQTT.Client(host, ssl ? 443 : 80, path, "WindRose@" + window.location);
-        let askhistory = null;
+        let nonce = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
         mqtt.onMessageArrived = (msg) => {
             try {
                 msg = JSON.parse(msg.payloadString);
-                if (askhistory && Date.now() - askhistory < 5000 && msg.history) {  // We asked for history within previous 5s; use it.
-                    askhistory = 0;
+                if (msg.history && msg.history.nonce == nonce) {        // Make sure it's our history request we asked for
                     windrose.preload(msg.history);
                 }
                 if (typeof msg.dir == "number" && typeof msg.speed == "number") {
@@ -114,8 +113,7 @@ function initialize() {
                     const when = Date.now() - 24*60*60*1000;    // 24hrs
                     const numarcs = windrose.rose.length;
                     const bands = windrose.bands;
-                    askhistory = Date.now();
-                    mqtt.send(topic + "/history", JSON.stringify({format: "delta", when:when, numarcs: numarcs, bands: bands}));
+                    mqtt.send(topic + "/history", JSON.stringify({format: "delta", when:when, numarcs: numarcs, bands: bands, nonce: nonce}));
                 } catch (e) {
                     console.log(e);
                 }

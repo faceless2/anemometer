@@ -278,6 +278,12 @@ function publishHistory(req) {
             guesswhen = guesswhen += step;
         }
         msg.records = records;
+        if (req.id) {
+            msg.id = req.id;
+        }
+        if (req.nonce) {
+            msg.nonce = req.nonce;
+        }
         return msg;
     } else {
         let records = [];
@@ -297,6 +303,12 @@ function publishHistory(req) {
             last = when;
         }
         msg.records = records;
+        if (req.id) {
+            msg.id = req.id;
+        }
+        if (req.nonce) {
+            msg.nonce = req.nonce;
+        }
         return msg;
     }
 }
