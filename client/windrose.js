@@ -31,6 +31,7 @@ class WindRose {
     #ballText;
     #mqtt;
     #freqsteps;
+    #preloading;
     rose;               // the rose 2D array
     rose0;              // same as an entry in the rose array, but for speed=0
     bands;              // the bands array containing the upper-bound of each speed band
@@ -142,46 +143,11 @@ class WindRose {
         mqtt.onMessageArrived = (msg) => {
             try {
                 msg = JSON.parse(msg.payloadString);
-                if (msg.history && askhistory && Date.now() - askhistory < 5000) {
-                    let recordCount = 0;
-                    if (msg.history.format == "delta") {
-                        let numarcs = this.rose.length;
-                        let step = msg.history.step;
-                        let when = msg.history.when;
-                        let records = msg.history.records;
-                        let target = 0;
-                        for (let i=0;i<records.length;i++) {
-                            let v = records[i];
-                            if (typeof v == "number") {
-                                recordCount++;
-                                target += v;
-                                if (target < 0) {
-                                    this.#update(0, 0, when);
-                                } else {
-                                    let band = Math.floor(target / numarcs);
-                                    let arc = target - (band * numarcs);
-                                    let dir = (arc + 0.5) * this.options.arc;
-                                    let speed = (this.bands[band] + (band == 0 ? 0 : this.bands[band - 1])) / 2;
-                                    this.#update(dir, speed, when);
-                                }
-                                when += step;
-                            } else if (v.when) {
-                                when += v.when;
-                            }
-                        }
-                        requestAnimationFrame(() => { this.#animate() });
-                    } else {
-                        let when = msg.history.when;
-                        for (let i=0;i<records.length;i++) {
-                            let dir = records[i++];
-                            let speed = records[i++];
-                            when += records[i++];
-                            this.#update(dir, speed, when);
-                            recordCount++;
-                        }
-                    }
-                    console.log("Loaded " + recordCount + " records from history");
-                } else {
+                if (askhistory && Date.now() - askhistory < 5000 && msg.history) {
+                    askhistory = 0;
+                    this.preload(msg.history);
+                }
+                if (typeof msg.dir == "number" && typeof msg.speed == "number") {
                     that.update(msg.dir, msg.speed, msg.when);
                 }
             } catch (e) {
@@ -191,13 +157,13 @@ class WindRose {
         mqtt.connect({
             onSuccess: () => {
                 try {
-                    console.log("Connected to " + url + ", subscribing to \"" + topic + "\"");
+                    console.log("Wind-rose \"" + that.options.id+"\": connected to " + url + ", subscribing to \"" + topic + "\"");
                     mqtt.subscribe(topic);
                     that.#loadBands();
                     const numarcs = this.rose.length;
                     const bands = this.bands;
                     askhistory = Date.now();
-                    console.log("Publishing \"" + topic + "/history");
+                    console.log("Wind-rose \"" + that.options.id + "\": publishing \"" + topic + "/history");
                     let msg = new Paho.MQTT.Message(JSON.stringify({format: "delta", numarcs: numarcs, bands:bands}));
                     msg.destinationName = topic + "/history";
                     mqtt.send(msg);
@@ -210,19 +176,122 @@ class WindRose {
     }
 
     /**
+     * Preload a bulk collection of records into the system. While it's possible to simply call "update" multiple
+     * times, there are more concise ways of representing tens of thousands of values. This method defines two:
+     *
+     *  {"format":"simple","when":N,"records":[a,b,c, a,b,c ... ]}
+     *
+     * For the simple format, specify a start date in ms since the epoch, then an array of Nx3 values, where the
+     * "a" value is the direction, the "b" value the speed, and the "c" value the milliseconds since the previous
+     * record (or the "when" value for the first record)
+     *
+     *  {"format":"delta","when":N,"skip":M,"numarcs":A,"bands":[b1,b2,b3...],"records":[v, v, {"when:d}, v, v ...]
+     *
+     * This more complex record is more consise still. The "when" value is the same as above and "skip" defines
+     * the default number of ms between successive records. "numarcs" is the number of segments on the rose; if each
+     * segment was 20° this value would be 18. "bands" are the speed bands, so [var(--speed1), var(---speed2) etc],
+     * and "records" is an encoded sequence of numbers and/or time adjustments: a values of the form {"when":d} specifies
+     * a delta to be applied to the timestamp derived from the initial "when" and a series of "step" increments.
+     *
+     * The "v" values are integers. Create a variable bucket=0, meaning "arc 0, band 0" (0°, the lowest speed). Each
+     * "v" value is added to the previous bucket value to assign the record to an arc/band segment: 1=[arc 1, band 0] etc,
+     * with the band increasing when arc >= numarcs. A bucket value of -1 means speed=0.
+     */
+    preload(data) {
+        this.#preloading = true;
+        try {
+            let start; 
+            const a = [];
+            if (data.format == "delta") {
+                let numarcs = this.rose.length;
+                let step = data.step;
+                let when = data.when;
+                start = when;
+                let records = data.records;
+                let target = 0;
+                let lastwhen = when;
+                for (let i=0;i<records.length;i++) {
+                    let v = records[i];
+                    if (typeof v == "number") {
+                        target += v;
+                        let dir = 0, speed = 0;
+                        if (target >= 0) {
+                            let band = Math.floor(target / numarcs);
+                            let arc = target - (band * numarcs);
+                            dir = (arc + 0.5) * this.options.arc;
+                            speed = (this.bands[band] + (band == 0 ? 0 : this.bands[band - 1])) / 2;
+                        }
+                        a.push(dir);
+                        a.push(speed);
+                        a.push(when - lastwhen);
+                        lastwhen = when;
+                        when += step;
+                    } else if (v.when) {
+                        when += v.when;
+                    }
+                }
+            } else {
+                start = data.when;
+                a = data.records;
+            }
+            // Load in smaller batches to not lock the UI
+            let recordcount = 0, bandcount = [];
+            let f = (when, off) => {
+//                console.log("batch: when="+new Date(when).toISOString()+" off="+off+"/"+a.length);
+                let end = Math.min(a.length, off + (500 * 3));
+                while (off < end) {
+                    let dir = a[off++];
+                    let speed = a[off++];
+                    when += a[off++];
+                    this.#update(dir, speed, when);
+                    let band = 0;
+                    if (speed > 0) {
+                        for (let j=0;j<this.bands.length;j++) {
+                            if (speed < this.bands[j]) {
+                                band = j + 1;
+                                break;
+                            }
+                        }
+                    }
+                    while (band >= bandcount.length) {
+                        bandcount.push(0);
+                    }
+                    bandcount[band]++;
+                    recordcount++;
+                }
+                if (end == a.length) {
+                    this.#preloading = false;
+                    console.log("Wind-rose \"" + this.options.id + "\": pre-loaded " + recordcount + " records from " + new Date(start).toISOString()+" to " + new Date(when).toISOString()+": speed histogram=" + JSON.stringify(bandcount));
+                } else {
+                    setTimeout(() => { f(when, end) }, 0);
+                }
+            }
+            setTimeout(() => { f(start, 0) }, 0);
+        } catch (e) {
+            this.#preloading = false;
+            throw e;
+        }
+    }
+
+    /**
      * Add an anemometer event. Parameters can also be specified as an object, eg update({dir:340,speed:2});
      * @param dir the direction in degrees
      * @param speed the speed in units
      * @param when the timestamp in seconds or milliseconds (if missing, set to now)
      */
     update(dir, speed, when) {
+        if (this.#preloading) {
+            return;
+        }
+        if (this.options.debug) {
+            console.log("Wind-rose \"" + this.options.id + "\": update: dir="+dir+" speed="+speed+" when="+new Date(when).toISOString());
+        }
         this.#loadBands();
         this.#update(dir, speed, when);
         requestAnimationFrame(() => { this.#animate() });
     }
 
     #update(dir, speed, when) {
-        console.log("update: dir="+dir+" speed="+speed+" when="+new Date(when).toISOString());
         if (typeof speed == "undefined" && typeof when == "undefined" && typeof dir == "object") {
             speed = dir.speed;
             when = dir.when;
@@ -235,7 +304,7 @@ class WindRose {
 
         if (!when) {
             when = now;
-        } else if (when < 1756318354000) {     // convert from s to ms
+        } else if (when < 1000000000000) {     // convert from s to ms
             when *= 1000;
         }
         const msg = {
@@ -248,7 +317,11 @@ class WindRose {
         if (this.q.length == 0 || this.q[this.q.length - 1].when < when) {
             this.q.push(msg);
         } else {
-            for (let i=msg.length-1;i>=0;i--) {
+            for (let i=this.q.length-1;i>=0;i--) {
+                let r = this.q[i];
+                if (r.when == when && r.speed == speed && r.dir == dir) {
+                    return;     // discard duplicates
+                }
                 if (i == 0 || this.q[i - 1].when < msg.when) {
                     this.q.splice(i, 0, msg);
                     break;
@@ -337,6 +410,17 @@ class WindRose {
             } else if (freq == minfreq && i == maxmindir + 1) {
                 maxmindir = i;
             }
+        }
+        if (maxfreq > 1) {
+            console.log("rose0="+this.rose0.count+"/"+total);
+            for (let i=0;i<numarcs;i++) {
+                let x = [];
+                for (let j=0;j<this.rose[i].length;j++) {
+                    x.push(this.rose[i][j].count);
+                }
+                console.log("rose["+i+"]="+JSON.stringify(x));
+            }
+            throw new Error("maxfreq="+maxfreq);
         }
         maxfreq = Math.max(Math.min(maxfreq, this.options.freq_max), this.options.freq_min);
         const freqsteps = Math.ceil(maxfreq / (this.options.freq_step / 100));

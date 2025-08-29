@@ -19,6 +19,7 @@
     font: 30px sans-serif;
     .key {
         /* if a key object is created, it will be inside a foreignObject filling the SVG */
+        /* Safari messes this up */
         display: flex;
         width: 100%;
         position: absolute;
@@ -54,29 +55,3 @@
         }
     }
 }
-#debug {
-    border: 1px solid red;
-}
-</style>
-<script>
-function initialize() {
-    let wind = new WindRose(document.getElementById("wind"), {
-    });
-    if (false) {
-        let rot = 0;
-        setInterval(() => {
-            wind.update({speed: 3, dir: rot});
-            rot += 10;
-        }, 1000);
-    } else {
-        wind.subscribe("/ws/", "wh/anemometer");
-    }
-}
-document.addEventListener("DOMContentLoaded", initialize);
-</script>
-</head>
-<body>
- <svg id="wind"></svg>
- <div id="debug"></div>
-</body>
-</html>
